@@ -192,6 +192,8 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     var webSubtitleEnabled by remember { mutableStateOf(false) }
     var pageTranslationEnabled by remember { mutableStateOf(false) }
     var webLiveMicEnabled by remember { mutableStateOf(false) }
+    var longPressHitResult by remember { mutableStateOf<WebView.HitTestResult?>(null) }
+    var showLongPressDialog by remember { mutableStateOf(false) }
     val liveSubtitleText by LiveSubtitleEngine.activeSubtitleText.collectAsState()
     val translationSource by LiveSubtitleEngine.translationSource.collectAsState()
     val voiceModelStatus by VoskModelManager.status.collectAsState()
@@ -1355,6 +1357,101 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     if (showDiagnosticsSheet) {
         DiagnosticsDialog(
             onDismiss = { showDiagnosticsSheet = false }
+        )
+    }
+
+    // Long Press Context Menu Dialog for WebView Links & Images
+    if (showLongPressDialog && longPressHitResult != null) {
+        val hit = longPressHitResult!!
+        val extra = hit.extra ?: ""
+        val isLink = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE || hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+        val isImage = hit.type == WebView.HitTestResult.IMAGE_TYPE || hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+
+        AlertDialog(
+            onDismissRequest = { showLongPressDialog = false },
+            title = { Text(if (isLink && isImage) "خيارات الرابط والصورة" else if (isLink) "خيارات الرابط" else "خيارات الصورة") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(text = extra, style = MaterialTheme.typography.bodySmall, maxLines = 3, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    if (isLink) {
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                viewModel.addNewTab(url = extra)
+                                Toast.makeText(context, "تم فتح الرابط في تبويب جديد", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Tab, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("فتح في تبويب جديد")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("URL", extra))
+                                Toast.makeText(context, "تم نسخ الرابط إلى الحافظة", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("نسخ الرابط")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                val guessedName = android.webkit.URLUtil.guessFileName(extra, null, null)
+                                DownloadManager.startDownload(
+                                    context = context,
+                                    url = extra,
+                                    title = guessedName,
+                                    quality = "تنزيل مباشر",
+                                    mimeType = "application/octet-stream",
+                                    pageUrl = activeTab?.url
+                                )
+                                Toast.makeText(context, "بدء تنزيل: $guessedName", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("تنزيل الملف / الرابط")
+                        }
+                    }
+
+                    if (isImage && extra.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                val guessedName = android.webkit.URLUtil.guessFileName(extra, null, "image/*")
+                                DownloadManager.startDownload(
+                                    context = context,
+                                    url = extra,
+                                    title = guessedName,
+                                    quality = "تنزيل صورة",
+                                    mimeType = "image/*",
+                                    pageUrl = activeTab?.url
+                                )
+                                Toast.makeText(context, "بدء تنزيل الصورة", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("حفظ وتنزيل الصورة")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLongPressDialog = false }) { Text("إغلاق") }
+            }
         )
     }
 
