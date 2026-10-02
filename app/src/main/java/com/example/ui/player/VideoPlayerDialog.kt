@@ -683,6 +683,26 @@ fun VideoPlayerDialog(
                             Text(if (isLiveTranslating) "التقاط الصوت الداخلي مفعّل" else "ترجمة صوت الفيديو الداخلي")
                         }
 
+                        if (isLiveTranslating) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (LiveSubtitleEngine.translationSource.value == com.example.data.translation.TranslationSource.INTERNAL_AUDIO) {
+                                        context.startService(Intent(context, PlaybackCaptureService::class.java).apply { action = PlaybackCaptureService.ACTION_STOP })
+                                    }
+                                    LiveSubtitleEngine.stopMicrophoneRecognition()
+                                    LiveSubtitleEngine.clear()
+                                    Toast.makeText(context, "تم إيقاف الترجمة الحية", Toast.LENGTH_SHORT).show()
+                                    showTranslationSheet = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Icon(Icons.Default.Stop, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("إيقاف الترجمة الحية")
+                            }
+                        }
+
                         OutlinedButton(
                             onClick = { subtitleFileLauncher.launch(arrayOf("text/*", "application/x-subrip", "application/ttml+xml")) },
                             modifier = Modifier.fillMaxWidth()

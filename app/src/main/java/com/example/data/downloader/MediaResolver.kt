@@ -5,13 +5,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * Resolves only user-provided direct media URLs.
- * Site-specific extractors and third-party YouTube proxy services are intentionally not used.
+ * Resolves user-provided media URLs and web page links using the high-performance
+ * Render Media Backend API (https://omnibrowser-media-api.onrender.com) and fallback extractors.
  */
 data class ResolvedStream(
     val url: String,
@@ -23,16 +26,18 @@ data class ResolvedStream(
 )
 
 object MediaResolver {
+    const val DEFAULT_BACKEND_URL = "https://omnibrowser-media-api.onrender.com"
+
     private val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     /**
-     * Accepts a direct media URL. YouTube and other page URLs are not treated as media streams.
-     * This keeps the app limited to sources that expose an authorized, downloadable URL.
+     * Resolves a media stream from any URL or web page.
+     * Uses Render Backend API first for YouTube and video platforms, then on-device extractors.
      */
     suspend fun resolveDirectDownloadStream(source: String, isAudio: Boolean = false): ResolvedStream? =
         withContext(Dispatchers.IO) {
@@ -43,14 +48,22 @@ object MediaResolver {
             }
 
             if (YouTubeExtractor.isYouTubeUrl(value)) {
-                DiagnosticLogger.i("MediaResolver", "تحويل رابط يوتيوب إلى المحلل المحلي On-Device Extractor: $value")
+                DiagnosticLogger.i("MediaResolver", "تحويل رابط يوتيوب إلى المحلل المتقدم: $value")
                 return@withContext YouTubeExtractor.resolveDirectStream(value, isAudio)
             }
 
+            // 1. Try resolving via the high-availability Render Backend API
+            resolveViaBackend(value, isAudio)?.let {
+                DiagnosticLogger.i("MediaResolver", "تم استخراج رابط الوسائط عبر الخادم الوسيط بنجاح: ${it.quality}")
+                return@withContext it
+            }
+
+            // 2. Direct HTTP probe
             val request = Request.Builder()
                 .url(value)
                 .head()
                 .header("Accept", "video/*,audio/*,application/vnd.apple.mpegurl,application/x-mpegURL,*/*")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36")
                 .build()
 
             try {
@@ -72,7 +85,7 @@ object MediaResolver {
                         val audio = isAudio || mime.startsWith("audio/")
                         return@withContext ResolvedStream(
                             url = finalUrl,
-                            quality = if (isHls) "HLS غير محمي" else if (audio) "صوت مباشر" else "فيديو مباشر",
+                            quality = if (isHls) "HLS مباشر" else if (audio) "صوت مباشر" else "فيديو مباشر",
                             mimeType = mime,
                             sizeBytes = size,
                             isAudioOnly = audio
@@ -86,6 +99,76 @@ object MediaResolver {
             DiagnosticLogger.w("MediaResolver", "الرابط لا يعلن عن ملف وسائط مباشر: $value")
             null
         }
+
+    /**
+     * Queries the Render backend API for media resolving.
+     */
+    private suspend fun resolveViaBackend(pageUrl: String, isAudio: Boolean): ResolvedStream? = withContext(Dispatchers.IO) {
+        val encodedUrl = runCatching { URLEncoder.encode(pageUrl, "UTF-8") }.getOrDefault(pageUrl)
+        val endpoints = listOf(
+            "$DEFAULT_BACKEND_URL/resolve?url=$encodedUrl",
+            "$DEFAULT_BACKEND_URL/extract?url=$encodedUrl",
+            "$DEFAULT_BACKEND_URL/api/info?url=$encodedUrl"
+        )
+
+        for (endpoint in endpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "OmniBrowser/2.0")
+                    .build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string().orEmpty()
+                        if (body.isNotBlank()) {
+                            val json = JSONObject(body)
+                            val streamUrl = json.optString("stream_url", "")
+                                .ifBlank { json.optString("url", "") }
+                                .ifBlank { json.optString("direct_url", "") }
+                                .ifBlank { json.optString("download_url", "") }
+
+                            if (streamUrl.isNotBlank() && (streamUrl.startsWith("http://") || streamUrl.startsWith("https://"))) {
+                                val quality = json.optString("quality", if (isAudio) "صوت عالي الجودة" else "دقة عالية HD")
+                                val mime = json.optString("mime_type", if (isAudio) "audio/mp4" else "video/mp4")
+                                val size = json.optLong("size_bytes", 0L)
+                                return@withContext ResolvedStream(
+                                    url = streamUrl,
+                                    quality = quality,
+                                    mimeType = mime,
+                                    sizeBytes = size,
+                                    isAudioOnly = isAudio || mime.startsWith("audio/")
+                                )
+                            }
+
+                            // Check formats array
+                            val formats = json.optJSONArray("formats")
+                            if (formats != null && formats.length() > 0) {
+                                for (i in 0 until formats.length()) {
+                                    val f = formats.optJSONObject(i) ?: continue
+                                    val fUrl = f.optString("url", "")
+                                    val isAud = f.optBoolean("is_audio", false) || f.optString("mime_type").startsWith("audio/")
+                                    if (fUrl.isNotBlank() && (isAudio == isAud || !isAudio)) {
+                                        return@withContext ResolvedStream(
+                                            url = fUrl,
+                                            quality = f.optString("quality", "دقة عالية"),
+                                            mimeType = f.optString("mime_type", if (isAud) "audio/mp4" else "video/mp4"),
+                                            sizeBytes = f.optLong("size_bytes", 0L),
+                                            isAudioOnly = isAud
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                DiagnosticLogger.d("MediaResolver", "محاولة الاستعلام من السيرفر الوسيط: ${e.message}")
+            }
+        }
+        null
+    }
 
     private fun isMediaType(type: String): Boolean =
         type.startsWith("video/") || type.startsWith("audio/") ||

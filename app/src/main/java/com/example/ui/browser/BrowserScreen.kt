@@ -688,7 +688,8 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                 }
                 LazyRow(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     lazyItems(tabs, key = { it.id }) { tab ->
                         Surface(
@@ -725,6 +726,22 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                 IconButton(onClick = { viewModel.closeTab(tab.id) }, modifier = Modifier.size(28.dp)) {
                                     Icon(Icons.Default.Close, contentDescription = "إغلاق التبويب", modifier = Modifier.size(16.dp))
                                 }
+                            }
+                        }
+                    }
+
+                    // Persistent prominent + New Tab button in the tab bar
+                    item {
+                        Surface(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .clickable { viewModel.addNewTab("https://www.google.com", isIncognito = false) },
+                            color = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Add, contentDescription = "فتح تبويب جديد", modifier = Modifier.size(20.dp))
                             }
                         }
                     }
@@ -856,6 +873,26 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                         pageUrl = activeTab?.url
                                     )
                                     Toast.makeText(ctx, "بدء تنزيل الملف: $suggestedName", Toast.LENGTH_SHORT).show()
+                                }
+
+                                setOnLongClickListener {
+                                    val hit = hitTestResult
+                                    val extra = hit.extra.orEmpty()
+                                    val isActionable = hit.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
+                                        hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE ||
+                                        hit.type == WebView.HitTestResult.IMAGE_TYPE ||
+                                        hit.type == WebView.HitTestResult.PHONE_TYPE ||
+                                        hit.type == WebView.HitTestResult.GEO_TYPE ||
+                                        hit.type == WebView.HitTestResult.EMAIL_TYPE ||
+                                        extra.isNotBlank()
+
+                                    if (isActionable) {
+                                        longPressHitResult = hit
+                                        showLongPressDialog = true
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 }
 
                                 addJavascriptInterface(
@@ -1379,7 +1416,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         OutlinedButton(
                             onClick = {
                                 showLongPressDialog = false
-                                viewModel.addNewTab(url = extra)
+                                viewModel.addNewTab(url = extra, isIncognito = false)
                                 Toast.makeText(context, "تم فتح الرابط في تبويب جديد", Toast.LENGTH_SHORT).show()
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -1387,6 +1424,19 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                             Icon(Icons.Default.Tab, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("فتح في تبويب جديد")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                viewModel.addNewTab(url = extra, isIncognito = true)
+                                Toast.makeText(context, "تم فتح الرابط في تبويب خفي", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("فتح في تبويب خفي")
                         }
 
                         OutlinedButton(
@@ -1423,6 +1473,24 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("تنزيل الملف / الرابط")
                         }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                try {
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, extra)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "مشاركة الرابط"))
+                                } catch (_: Exception) {}
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("مشاركة الرابط")
+                        }
                     }
 
                     if (isImage && extra.isNotBlank()) {
@@ -1445,6 +1513,49 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                             Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("حفظ وتنزيل الصورة")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                viewModel.addNewTab(url = extra, isIncognito = false)
+                                Toast.makeText(context, "تم فتح الصورة في تبويب جديد", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("فتح الصورة في تبويب جديد")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Image URL", extra))
+                                Toast.makeText(context, "تم نسخ رابط الصورة", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("نسخ رابط الصورة")
+                        }
+                    }
+
+                    if (!isLink && !isImage && extra.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                showLongPressDialog = false
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Text", extra))
+                                Toast.makeText(context, "تم نسخ النص", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("نسخ النص")
                         }
                     }
                 }

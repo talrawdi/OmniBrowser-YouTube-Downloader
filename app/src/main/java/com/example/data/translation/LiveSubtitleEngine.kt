@@ -326,6 +326,11 @@ object LiveSubtitleEngine {
     }
 
     fun updatePlaybackPosition(currentPositionMs: Long) {
+        if (_translationSource.value == TranslationSource.INTERNAL_AUDIO ||
+            _translationSource.value == TranslationSource.MICROPHONE) {
+            // In live audio capture or microphone mode, subtitle is pushed directly by real-time speech recognizer
+            return
+        }
         val cues = _currentSubtitleCues.value
         if (cues.isEmpty()) return
         val active = cues.firstOrNull { it.startTimeMs <= currentPositionMs && currentPositionMs <= it.endTimeMs }

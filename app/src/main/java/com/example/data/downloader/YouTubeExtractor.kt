@@ -63,6 +63,8 @@ data class YouTubeSubtitle(
  */
 object YouTubeExtractor {
 
+    const val RENDER_BACKEND_URL = "https://omnibrowser-media-api.onrender.com"
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
@@ -122,7 +124,15 @@ object YouTubeExtractor {
      */
     suspend fun extract(videoIdOrUrl: String): YouTubeVideoInfo? = withContext(Dispatchers.IO) {
         val videoId = extractVideoId(videoIdOrUrl) ?: return@withContext null
-        DiagnosticLogger.i("YouTubeExtractor", "بدء استخراج بيانات الفيديو ($videoId) محلياً بدون خادم...")
+        DiagnosticLogger.i("YouTubeExtractor", "بدء استخراج بيانات الفيديو ($videoId)...")
+
+        // Strategy 0: Custom High-Performance Render Backend API (https://omnibrowser-media-api.onrender.com)
+        extractViaRenderBackend(videoId, videoIdOrUrl)?.let {
+            if (it.streams.isNotEmpty()) {
+                DiagnosticLogger.i("YouTubeExtractor", "تم استخراج الروابط المباشرة عبر خادم Render بنجاح!")
+                return@withContext it
+            }
+        }
 
         // Strategy 1: ANDROID_VR Innertube (Returns direct un-throttled progressive MP4s)
         extractViaInnertube(videoId, "ANDROID_VR")?.let {
@@ -594,6 +604,120 @@ object YouTubeExtractor {
             }
         }
         return list.joinToString("")
+    }
+
+    /**
+     * Primary strategy: Custom High-Performance Render Backend API (https://omnibrowser-media-api.onrender.com).
+     */
+    private suspend fun extractViaRenderBackend(videoId: String, originalUrl: String): YouTubeVideoInfo? {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val encodedUrl = runCatching { java.net.URLEncoder.encode(watchUrl, "UTF-8") }.getOrDefault(watchUrl)
+        val endpoints = listOf(
+            "$RENDER_BACKEND_URL/resolve?url=$encodedUrl",
+            "$RENDER_BACKEND_URL/extract?url=$encodedUrl",
+            "$RENDER_BACKEND_URL/api/info?url=$encodedUrl",
+            "$RENDER_BACKEND_URL/video?url=$encodedUrl"
+        )
+
+        for (endpoint in endpoints) {
+            try {
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "OmniBrowser/2.0 (Android)")
+                    .build()
+
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string().orEmpty()
+                        if (body.isNotBlank()) {
+                            val json = JSONObject(body)
+                            val title = json.optString("title", "فيديو يوتيوب")
+                            val duration = json.optLong("duration", 0L)
+                            val thumb = json.optString("thumbnail", "https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
+
+                            val streamsList = mutableListOf<YouTubeStream>()
+
+                            // Check single direct stream
+                            val directUrl = json.optString("stream_url", "")
+                                .ifBlank { json.optString("url", "") }
+                                .ifBlank { json.optString("direct_url", "") }
+                                .ifBlank { json.optString("download_url", "") }
+
+                            if (directUrl.isNotBlank() && (directUrl.startsWith("http://") || directUrl.startsWith("https://"))) {
+                                streamsList.add(
+                                    YouTubeStream(
+                                        itag = 22,
+                                        quality = json.optString("quality", "720p HD (عبر السيرفر الخاص)"),
+                                        url = directUrl,
+                                        mimeType = json.optString("mime_type", "video/mp4"),
+                                        sizeBytes = json.optLong("size_bytes", 0L),
+                                        clientSource = "RENDER_BACKEND"
+                                    )
+                                )
+                            }
+
+                            // Check formats array
+                            val formats = json.optJSONArray("formats")
+                            if (formats != null) {
+                                for (i in 0 until formats.length()) {
+                                    val f = formats.optJSONObject(i) ?: continue
+                                    val fUrl = f.optString("url", "")
+                                        .ifBlank { f.optString("stream_url", "") }
+                                    if (fUrl.isNotBlank()) {
+                                        val isAud = f.optBoolean("is_audio", false) || f.optString("mime_type").startsWith("audio/")
+                                        streamsList.add(
+                                            YouTubeStream(
+                                                itag = f.optInt("itag", 0),
+                                                quality = f.optString("quality", if (isAud) "صوت MP3/M4A" else "دقة عالية HD"),
+                                                url = fUrl,
+                                                mimeType = f.optString("mime_type", if (isAud) "audio/mp4" else "video/mp4"),
+                                                sizeBytes = f.optLong("size_bytes", 0L),
+                                                isAudioOnly = isAud,
+                                                clientSource = "RENDER_BACKEND"
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (streamsList.isNotEmpty()) {
+                                val subsList = mutableListOf<YouTubeSubtitle>()
+                                val subsArr = json.optJSONArray("subtitles")
+                                if (subsArr != null) {
+                                    for (i in 0 until subsArr.length()) {
+                                        val s = subsArr.optJSONObject(i) ?: continue
+                                        val sUrl = s.optString("url", "")
+                                        if (sUrl.isNotBlank()) {
+                                            subsList.add(
+                                                YouTubeSubtitle(
+                                                    url = sUrl,
+                                                    label = s.optString("label", "ترجمة"),
+                                                    languageCode = s.optString("lang", "ar")
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+
+                                DiagnosticLogger.i("YouTubeExtractor", "نجح استخراج بيانات الفيديو ($videoId) عبر خادم Render: ${streamsList.size} جودة")
+                                return YouTubeVideoInfo(
+                                    videoId = videoId,
+                                    title = title,
+                                    durationSeconds = duration,
+                                    thumbnailUrl = thumb,
+                                    streams = streamsList,
+                                    subtitles = subsList
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                DiagnosticLogger.d("YouTubeExtractor", "استعلام Render Backend: ${e.message}")
+            }
+        }
+        return null
     }
 
     /**
